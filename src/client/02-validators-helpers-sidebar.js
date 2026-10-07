@@ -468,6 +468,12 @@
       if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 7) fail('index', '0-7 integer')
       return v
     })
+    // GO 账号 id(本 fork):llm-pi-ai 路由名,或 undefined(缺省 = 全部账号)。
+    const goAccountIdCodec = codecOf(v => {
+      if (v === undefined || v === null) return undefined
+      if (typeof v !== 'string' || v.length === 0 || v.length > 64) fail('accountId', 'route name')
+      return v
+    })
     const dateCodec = codecOf(v => {
       return needStr(v, 'date')
     })
@@ -512,6 +518,9 @@
           },
         {
           method: 'refreshGoQuota',
+          // accountId(本 fork):多 GO 订阅下指定刷新的账号;缺省 = 全部账号。
+          // 与宿主 manifest 同口径,acceptsUndefined 允许旧调用不带参数。
+          parameters: [rpcParam('accountId', 'GoQuotaAccountId', goAccountIdCodec, true)],
           },
         {
           method: 'refreshCustomBalance',
@@ -2274,9 +2283,31 @@
       }
     }
 
+    // ── 多 GO 订阅(本 fork)──────────────────────────────────────────────
+    // 每个 GO 套餐订阅在宿主侧是一个 llm-pi-ai 路由,state.goQuotaAccounts 逐账号下发。
+    // 侧边栏是 root 作用域插槽,拿不到会话的模型选择,因此这里只做「手动浏览 + 切换」;
+    // 输入框上方的横条另由 QuotaStrip 按当前模型所属路由自动跟随。
+    const GO_ACCOUNT_LS_KEY = 'cm.go.account'
+
+    /** 当前浏览的 GO 账号 id(隐私模式下静默降级为空串)。 */
+    function readGoAccountLS() {
+      try { return window.localStorage?.getItem?.(GO_ACCOUNT_LS_KEY) ?? '' } catch { return '' }
+    }
+
+    /** 记住当前浏览的 GO 账号,刷新页面后保持。 */
+    function writeGoAccountLS(id) {
+      try { window.localStorage?.setItem?.(GO_ACCOUNT_LS_KEY, id) } catch { /* 隐私模式忽略 */ }
+    }
+
+    /** 全部 GO 账号快照;旧快照没有该数组时返回空数组(调用方自动走单账号路径)。 */
+    function goAccountsOf(state) {
+      return Array.isArray(state?.goQuotaAccounts) ? state.goQuotaAccounts : []
+    }
+
     /** OpenCode Go 额度图框内容(不含外框),与预算图框同风格;主档位可配(默认 5h),其余档位在下方一行展示;详细信息按 goQuota.detail 开关。 */
-    function goBoxBody(state, config, t) {
-      const goQuota = state.goQuota
+    function goBoxBody(state, config, t, goQuotaOverride) {
+      // 多账号:调用方可传入指定账号的额度快照;缺省沿用主账号镜像(旧路径不变)。
+      const goQuota = goQuotaOverride ?? state.goQuota
       const mainKey = config?.goQuota?.main === 'weekly' || config?.goQuota?.main === 'monthly' ? config.goQuota.main : 'rolling'
       const mainWin = goQuota[mainKey]
       const pct = mainWin !== null && typeof mainWin?.percent === 'number' ? Math.max(0, Math.min(100, Number(mainWin.percent) || 0)) : 0
@@ -2307,15 +2338,9 @@
       }
     }
 
-    function GoQuotaBox(props) {
-      const { state, wide } = props
-      const goQuota = state.goQuota
-      const t = makeT(resolveLocale(state.config))
-      if (!goQuota || goQuota.status !== 'ok') return null
-      const mainKey = state.config?.goQuota?.main === 'weekly' || state.config?.goQuota?.main === 'monthly' ? state.config.goQuota.main : 'rolling'
-      if (goQuota[mainKey] === null || typeof goQuota[mainKey]?.percent !== 'number') return null
-      const view = goBoxBody(state, state.config, t)
-      const detail = [
+    /** 单个 GO 额度快照的悬停明细(密钥/文案与单账号时完全一致)。 */
+    function goQuotaDetailOf(t, goQuota) {
+      return [
         t('goQuotaTitle'),
         t('goWindowRolling') + ': ' + (goQuota.rolling === null ? '—' : Math.round(goQuota.rolling.percent) + '%'),
         t('goWindowWeekly') + ': ' + (goQuota.weekly === null ? '—' : Math.round(goQuota.weekly.percent) + '%'),
@@ -2325,9 +2350,111 @@
             : '')),
         t('goQuotaFetchedAt', { time: goQuota.fetchedAt > 0 ? new Date(goQuota.fetchedAt).toLocaleTimeString() : '—' }),
       ].join('; ')
-      return el(Tooltip, { label: detail, side: 'right', delayMs: 300 },
+    }
+
+    function GoQuotaBox(props) {
+      const { state, wide } = props
+      const goQuota = state.goQuota
+      const t = makeT(resolveLocale(state.config))
+      if (!goQuota || goQuota.status !== 'ok') return null
+      const mainKey = state.config?.goQuota?.main === 'weekly' || state.config?.goQuota?.main === 'monthly' ? state.config.goQuota.main : 'rolling'
+      if (goQuota[mainKey] === null || typeof goQuota[mainKey]?.percent !== 'number') return null
+      const view = goBoxBody(state, state.config, t)
+      return el(Tooltip, { label: goQuotaDetailOf(t, goQuota), side: 'right', delayMs: 300 },
         el('div', { className: 'cm-bbox' + (view.level === 'ok' ? '' : ' ' + view.level) + (wide ? '' : ' rail') },
           wide ? view.body : el('div', { className: 'cm-bbox-rail cm-num' }, view.rail)))
+    }
+
+    /**
+     * 多个 GO 订阅的侧边栏卡片组(本 fork):每个账号一张卡片,横向滑动切换。
+     * 滑动是纯 CSS scroll-snap(触摸端零代码),桌面补禁止/圆点/键盘 ←→;
+     * 当前浏览的账号记在 localStorage,刷新页面后保持。
+     * 窄栏(rail)只有约 40px 宽,横向分页无意义,退化为百分比方块 + N/M 切换按钮。
+     */
+    function GoQuotaDeck(props) {
+      const { state, wide } = props
+      const accounts = goAccountsOf(state)
+      const t = makeT(resolveLocale(state.config))
+      const trackRef = useRef(null)
+      const [selected, setSelected] = useState(readGoAccountLS)
+      const count = accounts.length
+      // 选中项:先按持久化 id 命中;失效(账号被删/改名)时回退第一个有数据的账号。
+      const persisted = accounts.findIndex(account => account?.id === selected)
+      const usable = accounts.findIndex(account => account?.status === 'ok')
+      const activeIndex = persisted >= 0 ? persisted : usable >= 0 ? usable : 0
+      const active = accounts[activeIndex] ?? null
+      const select = index => {
+        const next = accounts[index]
+        if (next === null || next === undefined || next.id === selected) return
+        setSelected(next.id)
+        writeGoAccountLS(next.id)
+      }
+      const goTo = index => {
+        const clamped = Math.max(0, Math.min(count - 1, index))
+        const track = trackRef.current
+        if (track !== null && track !== undefined && typeof track.scrollTo === 'function') {
+          track.scrollTo({ left: clamped * track.clientWidth, behavior: 'smooth' })
+        }
+        select(clamped)
+      }
+      const onScroll = event => {
+        const track = event.currentTarget
+        if (track === null || track === undefined || track.clientWidth <= 0) return
+        select(Math.max(0, Math.min(count - 1, Math.round(track.scrollLeft / track.clientWidth))))
+      }
+      const onKeyDown = event => {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+        event.stopPropagation()
+        event.preventDefault?.()
+        goTo(activeIndex + (event.key === 'ArrowRight' ? 1 : -1))
+      }
+      if (count === 0 || active === null) return null
+      const view = goBoxBody(state, state.config, t, active)
+      const label = typeof active.label === 'string' && active.label.length > 0 ? active.label : active.id
+      const tip = el('span', { style: { whiteSpace: 'pre-line' } }, [label, goQuotaDetailOf(t, active)].join('\n'))
+      if (!wide) {
+        return el(Tooltip, { label: tip, side: 'right', delayMs: 300 },
+          el('div', { className: 'cm-bbox rail' + (view.level === 'ok' ? '' : ' ' + view.level) },
+            el('div', { className: 'cm-bbox-rail cm-num' }, view.rail),
+            count > 1 ? el('span', {
+              className: 'cm-gw-switcher',
+              role: 'button',
+              tabIndex: 0,
+              'aria-label': t('goAccountSwitch', { account: label }),
+              onClick: () => goTo(activeIndex + 1),
+              onKeyDown: event => {
+                if (event.key && event.key !== 'Enter' && event.key !== ' ') return
+                event.stopPropagation()
+                event.preventDefault?.()
+                goTo(activeIndex + 1)
+              },
+            }, (activeIndex + 1) + '/' + count + ' ⇄') : null))
+      }
+      return el(Tooltip, { label: tip, side: 'right', delayMs: 300 },
+        el('div', { className: 'cm-go-deck' },
+          el('div', {
+            className: 'cm-go-track',
+            ref: trackRef,
+            tabIndex: 0,
+            role: 'group',
+            'aria-label': t('goAccountsTitle'),
+            onScroll,
+            onKeyDown,
+          }, accounts.map((account, index) => {
+            const itemView = goBoxBody(state, state.config, t, account)
+            const itemLabel = typeof account?.label === 'string' && account.label.length > 0 ? account.label : account?.id
+            return el('div', { key: account?.id ?? index, className: 'cm-go-slide' },
+              el('div', { className: 'cm-bbox' + (itemView.level === 'ok' ? '' : ' ' + itemView.level) },
+                el('div', { className: 'cm-gw-sub' }, itemLabel),
+                itemView.body))
+          })),
+          count > 1 ? el('div', { className: 'cm-go-dots' }, accounts.map((account, index) => el('button', {
+            key: account?.id ?? index,
+            type: 'button',
+            className: 'cm-go-dot' + (index === activeIndex ? ' active' : ''),
+            'aria-label': t('goAccountDot', { index: index + 1, total: count }),
+            onClick: () => goTo(index),
+          }))) : null))
     }
 
     /** MiniMax Token Plan 窗口的已用百分比(与其它厂商同口径:windows.percent 即已用)。 */
@@ -2754,12 +2881,32 @@
       mimo: 'MiMo',
     }
 
+    /** 多 GO 订阅(本 fork):按 provider 路由名取账号快照;路由不匹配或为空时回退主账号。 */
+    function goAccountFor(state, route) {
+      const accounts = Array.isArray(state?.goQuotaAccounts) ? state.goQuotaAccounts : []
+      if (accounts.length === 0) return null
+      if (route !== null && route !== undefined) {
+        const hit = accounts.find(account => account && account.id === route)
+        if (hit !== undefined) return hit
+      }
+      return accounts[0] ?? null
+    }
+
+    /** 已发现的 GO 订阅数量(旧快照无此数组时为 0 → 自动走单账号兼容路径)。 */
+    function goAccountCount(state) {
+      return Array.isArray(state?.goQuotaAccounts) ? state.goQuotaAccounts.length : 0
+    }
+
     function QuotaStrip(props) {
       const costStore = props.useCost ? props.useCost(s => s) : undefined
       useCodexQuota(costStore?.state?.config?.codexQuotaEnabled === true)
       // Hook 先于一切条件返回(React 规则):横条会因 state 缺失/开关关闭随时提前 return null。
       const [busyKey, setBusyKey] = useState(null)
       const [errs, setErrs] = useState({})
+      // 会话作用域标准 prop(本 fork):当前会话的模型选择投影。视图为 { lastUsed, next },
+      // next = 用户刚切换的选择 ?? 最近一次实际请求,provider 即 llm-pi-ai 的路由名。
+      // 多 GO 订阅据此把横条绑到「当前模型所用的那个订阅」。
+      const modelSelection = props.useProjection ? props.useProjection('modelSelection') : undefined
       const state = costStore?.state
       const api = props.api
       if (!state) return null
@@ -2796,8 +2943,14 @@
         }
       }
       // Go chip:主窗口一档(与右下角 chips 的主窗口口径一致)。
+      // 多 GO 订阅(本 fork):显示「当前会话所选模型所属的 provider 路由」对应的订阅——
+      // modelSelection.next 在用户切换模型时立即更新,所以横条跟着模型走。该路由不是
+      // GO 订阅(例如切到官方模型)或会话尚未选过模型时回退主账号,单账号行为不变。
       if (strip.go !== false) {
-        const goQuota = state.goQuota
+        const goRoute = modelSelection?.next?.provider ?? modelSelection?.lastUsed?.provider ?? null
+        const goAccount = goAccountFor(state, goRoute)
+        const goQuota = goAccount ?? state.goQuota
+        const goMulti = goAccountCount(state) > 1
         if (config?.goQuota?.enabled !== false && goQuota?.status === 'ok') {
           const mainKey = config.goQuota.main === 'weekly' || config.goQuota.main === 'monthly' ? config.goQuota.main : 'rolling'
           const win = mainKey === 'rolling' ? goQuota.rolling : mainKey === 'weekly' ? goQuota.weekly : goQuota.monthly
@@ -2806,11 +2959,16 @@
             const level = pct >= 100 ? 'over' : pct >= 80 ? 'warn' : 'ok'
             const resets = typeof win.resetsAt === 'string' && win.resetsAt.length > 0
               ? ' · ' + t('goResetAt', { time: new Date(win.resetsAt).toLocaleString() }) : ''
+            // 多账号时悬停提示带上账号名,便于确认横条此刻代表哪个订阅。
+            const accountName = goMulti && typeof goAccount?.label === 'string' && goAccount.label.length > 0
+              ? goAccount.label + ' · ' : ''
             chips.push({
               key: 'go',
+              // 点击刷新只刷横条当前代表的那个订阅;null 时宿主按缺省刷新全部账号。
+              accountId: typeof goAccount?.id === 'string' ? goAccount.id : null,
               label: 'Go ' + t(mainKey === 'rolling' ? 'goShortRolling' : mainKey === 'weekly' ? 'goShortWeekly' : 'goShortMonthly'),
               level,
-              tip: 'Go: ' + pct + '%' + resets,
+              tip: accountName + 'Go: ' + pct + '%' + resets,
               segs: [{ name: 'main', pct: Math.round(simpleBarByDirection(pct, barDirectionOf(config, 'go')).width) }],
             })
           }
@@ -2877,13 +3035,14 @@
       // 点击 chip 即刷新对应数据源(issue #52):budget → getState、go → Go 额度、
       // codex → 客户端重探 dsh-codex-connect(issue #59)、厂商 → 该家 Coding Plan 全部窗口
       // 一次刷新;busy 互斥防连点。
-      const doRefresh = key => {
+      const doRefresh = (key, chip) => {
         if (busyKey !== null || !api) return
         setBusyKey(key)
         setErrs(m => ({ ...m, [key]: null }))
         Promise.resolve()
           .then(() => (key === 'budget' ? api.reload()
-            : key === 'go' ? api.refreshGoQuota()
+            // 多 GO 订阅:只刷新横条当前代表的那个账号;accountId 为 null 时宿主刷新全部。
+            : key === 'go' ? api.refreshGoQuota(chip?.accountId ?? null)
               : key === 'codex' ? fetchCodexQuota(true, config.codexQuotaEnabled === true)
                 : api.refreshCodingPlan(key)))
           .catch(error => { setErrs(m => ({ ...m, [key]: error?.message ?? String(error) })) })
@@ -2915,7 +3074,7 @@
           return el(Tooltip, { key: c.key, label: tipLines.join('; '), side: 'bottom', delayMs: 400 },
             el('span', {
               className: 'cm-qchip' + (api ? ' action' : '') + (c.level === 'ok' ? '' : ' ' + c.level),
-              ...(api ? clickableRefreshProps(busy, () => doRefresh(c.key)) : {}),
+              ...(api ? clickableRefreshProps(busy, () => doRefresh(c.key, c)) : {}),
             }, kids))
         }))
     }
@@ -3132,9 +3291,14 @@
       const showBalanceBar = showBalance && config.balance?.showProgressBar === true && state.balance?.status === 'ok'
       const showCustomBalanceBar = showCustomBalance && config.balance?.showProgressBar === true
       const goMainKey = config.goQuota?.main === 'weekly' || config.goQuota?.main === 'monthly' ? config.goQuota.main : 'rolling'
+      // 多 GO 订阅(本 fork):任一账号有主档位数据即可出卡;账号数组缺席时仍走原镜像字段。
+      const goAccounts = goAccountsOf(state)
+      const goMulti = goAccounts.length > 1
       const goOk = (config.goQuota?.enabled !== false)
         && (config.goQuota?.display === 'sidebar' || config.goQuota?.display === 'both')
-        && state.goQuota?.status === 'ok' && state.goQuota?.[goMainKey] !== null
+        && (goMulti
+          ? goAccounts.some(account => account?.status === 'ok' && account?.[goMainKey] !== null)
+          : state.goQuota?.status === 'ok' && state.goQuota?.[goMainKey] !== null)
       // Coding Plan 侧边栏卡片(issue #31):每家按 display 门控(侧边栏/两者),启用且查询成功才展示;
       // MiniMax 沿用专用 5h/7d 卡片(issue #57 起与通用卡片同为「已用」方向),其余厂商走通用 CodingPlanBox。
       const sidebarPlanIds = CODING_PLAN_ROWS
@@ -3178,7 +3342,12 @@
         : el(CodingPlanBox, { id, state, wide, api: props.api })))
       nodes.push(...gatewayNodes)
       if (codexOn) nodes.push(el(CodexPlanBox, { state, wide, api: props.api }))
-      if (goOk && budgetOn && wide && !simple) {
+      if (goOk && goMulti) {
+        // 多 GO 订阅(本 fork):每账号一张卡片,横向滑动切换。不与预算合并——合并卡的
+        // 两段式布局(Go 上、预算下)装不下滑动轨道,预算改回独立卡片。
+        nodes.push(el(GoQuotaDeck, { state, wide }))
+        if (budgetOn && !mergedBudget) nodes.push(el(BudgetBoxContent, { state, wide }))
+      } else if (goOk && budgetOn && wide && !simple) {
         // 同时出现:合并为一张卡片(Go 在上、预算在下,细分隔线),各自保留预警色与自己的详细信息开关。
         const goView = goBoxBody(state, config, t)
         const budgetView = budgetBoxBody(state, config, t)

@@ -134,26 +134,34 @@ for (const browserBundle of ['../lib/client.js', '../lib/client.statistics.js'])
   new vm.Script(src, { filename: browserBundle })
 }
 console.log('[ok] 浏览器端 bundle 语法门禁(client.js vm 编译)通过')
-// DSH STORE runtime byte bound: lib/client.js (bounded artifact) must stay < 262144
+// DSH STORE runtime byte bound: lib/client.js (bounded artifact) must stay < 262144.
+// 本 fork 本地自用放宽(口径与 scripts/build.mjs 一致):STORE_MAX_BYTES 仍是商店上架
+// 审核上限,实际门禁读 CM_MAX_CLIENT_BYTES(默认 512 KiB);要按上游口径自检就设
+// CM_MAX_CLIENT_BYTES=262144。两条路径都会打印与商店上限的差额。
+const STORE_MAX_BYTES = 262144
+const MAX_CLIENT_BYTES = Number(process.env.CM_MAX_CLIENT_BYTES ?? 524288)
 {
   const st = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.ok(Buffer.byteLength(st, 'utf8') < 262144, 'lib/client.js < 262144 bytes (DSH STORE per-file bound, src -> lib via esbuild)')
-  console.log('[ok] lib/client.js runtime byte bound (<262144) 通过 (' + Buffer.byteLength(st, 'utf8') + ' bytes)')
+  const size = Buffer.byteLength(st, 'utf8')
+  assert.ok(size < MAX_CLIENT_BYTES, `lib/client.js < ${MAX_CLIENT_BYTES} bytes (local bound; DSH STORE bound is ${STORE_MAX_BYTES}, src -> lib via esbuild)`)
+  console.log('[ok] lib/client.js runtime byte bound (<' + MAX_CLIENT_BYTES + ') 通过 (' + size + ' bytes; DSH STORE 上限 '
+    + STORE_MAX_BYTES + ', ' + (size <= STORE_MAX_BYTES ? '余量 ' + (STORE_MAX_BYTES - size) : '超出 ' + (size - STORE_MAX_BYTES)) + ' bytes)')
 }
 
 // DSH STORE 源码侧逐文件上限(v1.7.12,issue #239):固定 Commit 自动审核对仓库内每个
 // 源码文件同样设 262,144 字节上限——v1.7.11 的 src/client.js 单文件 437,004 字节正是
 // 「更新暂缓」的直接原因。源码拆为 src/client/ 顺序片段后,每片都必须守住该上限,
-// 否则下一版又会卡在同一道门禁上。口径与 build.mjs / DSH STORE 一致(UTF-8 字节)。
+// 否则下一版又会卡在同一道门禁上。口径与 build.mjs / DSH STORE 一致(UTF-8 字节);
+// 本地自用的放宽同上(MAX_CLIENT_BYTES,默认 512 KiB)。
 {
   const dir = new URL('../src/client/', import.meta.url)
   const parts = readdirSync(dir).filter(name => name.endsWith('.js')).sort()
   assert.ok(parts.length > 0, 'src/client/ 源码片段缺失')
   for (const name of parts) {
     const text = readFileSync(new URL(name, dir), 'utf8')
-    assert.ok(Buffer.byteLength(text, 'utf8') <= 262144, `src/client/${name} ≤ 262144 bytes (DSH STORE per-file bound, got ${Buffer.byteLength(text, 'utf8')})`)
+    assert.ok(Buffer.byteLength(text, 'utf8') <= MAX_CLIENT_BYTES, `src/client/${name} ≤ ${MAX_CLIENT_BYTES} bytes (local bound; DSH STORE bound is ${STORE_MAX_BYTES}, got ${Buffer.byteLength(text, 'utf8')})`)
   }
-  console.log('[ok] src/client/ 逐片段字节上限(≤262144)通过(' + parts.length + ' 片)')
+  console.log('[ok] src/client/ 逐片段字节上限(≤' + MAX_CLIENT_BYTES + ')通过(' + parts.length + ' 片)')
 }
 
 // 浏览器端 bundle 执行门禁(v1.7.10 教训):上面的 vm 编译门禁只查语法不执行,
@@ -1368,9 +1376,10 @@ assert.deepEqual(CODING_PLAN_PROVIDERS.scnet.credentialEnvs, [], 'scnet 不需�
   assert.ok(clientSource.includes('const [busyKey, setBusyKey] = useState(null)'), 'busyKey useState 存在')
   const qstripBody = clientSource.slice(clientSource.indexOf('function QuotaStrip('), clientSource.indexOf('function QuotaStripGuide('))
   assert.ok(qstripBody.indexOf('const [busyKey, setBusyKey] = useState(null)') < qstripBody.indexOf('if (!state) return null'), 'Hook 先于条件返回(React 规则)')
-  assert.ok(clientSource.includes("key === 'budget' ? api.reload()") && clientSource.includes("key === 'go' ? api.refreshGoQuota()") && clientSource.includes("api.refreshCodingPlan(key)"), '点击按 key 多路分发刷新')
+  // 本 fork:GO 分支持账号参数——多订阅时只刷新横条当前代表的那个订阅。
+  assert.ok(clientSource.includes("key === 'budget' ? api.reload()") && clientSource.includes("key === 'go' ? api.refreshGoQuota(chip?.accountId ?? null)") && clientSource.includes("api.refreshCodingPlan(key)"), '点击按 key 多路分发刷新')
   assert.ok(clientSource.includes("key === 'codex' ? fetchCodexQuota(true, config.codexQuotaEnabled === true)"), 'Codex chip 点击仅在开启后重探')
-  assert.ok(clientSource.includes('clickableRefreshProps(busy, () => doRefresh(c.key))'), 'chip 复用可点击属性 helper(role/tabIndex/aria-busy/键盘)')
+  assert.ok(clientSource.includes('clickableRefreshProps(busy, () => doRefresh(c.key, c))'), 'chip 复用可点击属性 helper(role/tabIndex/aria-busy/键盘)')
   assert.ok(clientSource.includes("'cm-qseg'") && clientSource.includes("'cm-qsep'"), '厂商多窗口分段渲染与竖分隔线样式类存在')
   console.log('[ok] 输入框上方额度横条(默认值/校验/清洗/双端声明/接线/首次引导/点击刷新与厂商融合)通过')
 }
@@ -1845,7 +1854,9 @@ console.log('[ok] 宽泛匹配与跨厂商兑底(路由 provider 费用为零修
   const retryIndexSource = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
   assert.ok(retryIndexSource.includes('err.soft = true'), 'queryBalance 守卫错误(未配置 Key/非官方端点)标记 soft')
   // 官方余额的 401 缓存与 500 自动恢复由 balance-credentials.mjs 实际调用验证。
-  assert.ok(retryIndexSource.includes("...goQuotaCache, value: { ...emptyGoQuota(), status: 'error'"), 'Go 额度硬失败写 error 状态并保留旧 fetchedAt')
+  // 本 fork 起 GO 额度为多账号:缓存结构从单例 goQuotaCache 改为按账号的
+  // goQuotaCaches[account.id],断言随之更新,语义(硬失败写 error 且保留旧 fetchedAt)不变。
+  assert.ok(retryIndexSource.includes("...goQuotaCaches[account.id], value: { ...emptyGoQuota(), status: 'error'"), 'Go 额度硬失败写 error 状态并保留旧 fetchedAt')
   // 自定义余额的失败与恢复通过 cache-lifecycle.mjs 实际调用服务验证。
   assert.ok(retryIndexSource.includes("...(codingPlanCaches[id] ?? { fetchedAt: 0, value: emptyCodingPlan() }),\n          value: { ...emptyCodingPlan(), status: 'error'"), 'Coding Plan 硬失败写 error 状态并保留旧 fetchedAt')
   assert.ok(retryIndexSource.includes("error && error.soft === true"), '软失败判定读取 error.soft 标记')

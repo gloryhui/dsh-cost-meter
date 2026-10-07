@@ -2796,7 +2796,8 @@
         getTurnCost: async (id, start, end) => call('getTurnCost', [id, start, end]),
         getTopSessions: async (limit, sort, dir) => call('getTopSessions', [limit, sort, dir]),
         refreshBalance: async () => receive(costMeter.refreshBalance(), 'rpcBalanceFailed'),
-        refreshGoQuota: async () => receive(costMeter.refreshGoQuota()),
+        // accountId(本 fork):多 GO 订阅下指定刷新的账号;缺省 = 全部账号。
+        refreshGoQuota: async (accountId = null) => receive(accountId == null ? costMeter.refreshGoQuota() : costMeter.refreshGoQuota(accountId)),
         refreshGatewayQuota: async (sourceId = null) => receive(sourceId == null ? costMeter.refreshGatewayQuota() : costMeter.refreshGatewayQuota(sourceId)),
         refreshCustomBalance: async (index = null) => receive(index == null ? costMeter.refreshCustomBalance() : costMeter.refreshCustomBalance(index)),
         refreshCodingPlan: async provider => receive(costMeter.refreshCodingPlan(provider)),

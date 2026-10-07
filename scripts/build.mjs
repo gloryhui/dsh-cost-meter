@@ -21,6 +21,19 @@ import assert from 'node:assert/strict'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
+// 门禁语义(本 fork 与上游的唯一差异):
+// STORE_MAX_BYTES 是 DSH STORE **上架审核**要求,不是 DSH 运行时限制——宿主侧没有
+// 对应的 bundle 体积检查(已在 app.asar 内核实)。本 fork 以 `dsh plugin add <本地路径>`
+// 本地安装自用,不经过商店审核,因此实际门禁 MAX_BYTES 默认放宽到 512 KiB;若要恢复
+// 上游口径,设 CM_MAX_CLIENT_BYTES=262144 即可(例如准备提 PR 前自检)。
+// 每次构建都会打印与商店上限的差额,便于随时判断还需瘦身多少字节。
+const STORE_MAX_BYTES = 262144
+const MAX_BYTES = Number(process.env.CM_MAX_CLIENT_BYTES ?? 524288)
+if (!Number.isInteger(MAX_BYTES) || MAX_BYTES <= 0) {
+  console.error(`✗ CM_MAX_CLIENT_BYTES must be a positive integer (got ${process.env.CM_MAX_CLIENT_BYTES})`)
+  process.exit(1)
+}
+
 const ORDERED_FRAGMENT = /^\d{2}-[a-z0-9-]*\.js$/
 const clientDir = resolve(projectRoot, 'src/client')
 const fragments = readdirSync(clientDir).filter(name => name.endsWith('.js')).sort()
@@ -36,8 +49,8 @@ if (unexpected.length > 0) {
 for (const name of fragments) {
   // 与 DSH STORE 审核同口径:UTF-8 字节,中文文案算多字节。
   const bytes = Buffer.byteLength(readFileSync(resolve(clientDir, name), 'utf8'), 'utf8')
-  if (bytes > 262144) {
-    console.error(`✗ src/client/${name} exceeds 262144 bytes (${bytes}) — split the fragment`)
+  if (bytes > MAX_BYTES) {
+    console.error(`✗ src/client/${name} exceeds ${MAX_BYTES} bytes (${bytes}) — split the fragment`)
     process.exit(1)
   }
 }
@@ -121,18 +134,23 @@ writeFileSync(outPath, header + result.code)
 // 字节口径与 test/verify.mjs 的门禁一致(UTF-8 字节而非 UTF-16 字符数,中文文案算多字节)。
 const bytes = Buffer.byteLength(header + result.code, 'utf8')
 console.log(`src/client/*.js (${fragments.length} fragments) -> lib/client.js ${bytes} bytes`)
-if (bytes > 262144) {
-  console.error(`✗ lib/client.js still exceeds 262144 bytes (${bytes})`)
+if (bytes > MAX_BYTES) {
+  console.error(`✗ lib/client.js still exceeds ${MAX_BYTES} bytes (${bytes})`)
   process.exit(1)
 }
-console.log('✓ lib/client.js within DSH STORE per-file bound (262144)')
+if (bytes <= STORE_MAX_BYTES) {
+  console.log(`✓ lib/client.js within DSH STORE per-file bound (${STORE_MAX_BYTES}); ${STORE_MAX_BYTES - bytes} bytes to spare`)
+} else {
+  console.log(`• lib/client.js exceeds the DSH STORE bound (${STORE_MAX_BYTES}) by ${bytes - STORE_MAX_BYTES} bytes — fine for local ` +
+    `installs, blocks store publishing (set CM_MAX_CLIENT_BYTES=262144 to self-check)`)
+}
 
 // DSH 0.2.0-rc.2 package-local chunks use the host's require.async contract.
 // The statistics screen has its own readable source and bounded runtime asset.
 const statisticsSource = readFileSync(resolve(projectRoot, 'src/statistics/index.js'), 'utf8')
 const statistics = await transform(statisticsSource, { minify: true, target: 'es2022', charset: 'utf8', legalComments: 'none' })
 for (const [name, text] of [['src/statistics/index.js', statisticsSource], ['lib/client.statistics.js', statistics.code]]) {
-  if (Buffer.byteLength(text) > 262144) throw new Error(`${name} exceeds the 262144-byte bound`)
+  if (Buffer.byteLength(text) > MAX_BYTES) throw new Error(`${name} exceeds the ${MAX_BYTES}-byte bound`)
 }
 writeFileSync(resolve(projectRoot, 'lib/client.statistics.js'), statistics.code)
 console.log(`✓ lib/client.statistics.js ${Buffer.byteLength(statistics.code)} bytes (loaded on demand)`)
