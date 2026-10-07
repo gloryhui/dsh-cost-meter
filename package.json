@@ -142,7 +142,8 @@
     "build": "node scripts/build.mjs",
     "test": "node test/verify.mjs",
     "build:store": "CM_MAX_CLIENT_BYTES=262144 node scripts/build.mjs",
-    "test:store": "CM_MAX_CLIENT_BYTES=262144 node test/verify.mjs"
+    "test:store": "CM_MAX_CLIENT_BYTES=262144 node test/verify.mjs",
+    "test:macos": "TMPDIR=/private/tmp node test/verify.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-credentials": "0.1.0-rc.8",
